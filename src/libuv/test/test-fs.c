@@ -31,7 +31,8 @@
 /* FIXME we shouldn't need to branch in this file */
 #if defined(__unix__) || defined(__POSIX__) || \
     defined(__APPLE__) || defined(__sun) || \
-    defined(_AIX) || defined(__MVS__)
+    defined(_AIX) || defined(__MVS__) || \
+    defined(__HAIKU__)
 #include <unistd.h> /* unlink, rmdir, etc. */
 #else
 # include <winioctl.h>
@@ -611,6 +612,15 @@ static void sendfile_cb(uv_fs_t* req) {
 }
 
 
+static void sendfile_nodata_cb(uv_fs_t* req) {
+  ASSERT(req == &sendfile_req);
+  ASSERT(req->fs_type == UV_FS_SENDFILE);
+  ASSERT(req->result == 0);
+  sendfile_cb_count++;
+  uv_fs_req_cleanup(req);
+}
+
+
 static void open_noent_cb(uv_fs_t* req) {
   ASSERT(req->fs_type == UV_FS_OPEN);
   ASSERT(req->result == UV_ENOENT);
@@ -1049,7 +1059,7 @@ TEST_IMPL(fs_async_dir) {
 }
 
 
-TEST_IMPL(fs_async_sendfile) {
+static int test_sendfile(void (*setup)(int), uv_fs_cb cb, off_t expected_size) {
   int f, r;
   struct stat s1, s2;
 
@@ -1062,14 +1072,8 @@ TEST_IMPL(fs_async_sendfile) {
   f = open("test_file", O_WRONLY | O_CREAT, S_IWUSR | S_IRUSR);
   ASSERT(f != -1);
 
-  r = write(f, "begin\n", 6);
-  ASSERT(r == 6);
-
-  r = lseek(f, 65536, SEEK_CUR);
-  ASSERT(r == 65542);
-
-  r = write(f, "end\n", 4);
-  ASSERT(r != -1);
+  if (setup != NULL)
+    setup(f);
 
   r = close(f);
   ASSERT(r == 0);
@@ -1087,7 +1091,7 @@ TEST_IMPL(fs_async_sendfile) {
   uv_fs_req_cleanup(&open_req2);
 
   r = uv_fs_sendfile(loop, &sendfile_req, open_req2.result, open_req1.result,
-      0, 131072, sendfile_cb);
+      0, 131072, cb);
   ASSERT(r == 0);
   uv_run(loop, UV_RUN_DEFAULT);
 
@@ -1100,9 +1104,10 @@ TEST_IMPL(fs_async_sendfile) {
   ASSERT(r == 0);
   uv_fs_req_cleanup(&close_req);
 
-  stat("test_file", &s1);
-  stat("test_file2", &s2);
-  ASSERT(65546 == s2.st_size && s1.st_size == s2.st_size);
+  ASSERT(0 == stat("test_file", &s1));
+  ASSERT(0 == stat("test_file2", &s2));
+  ASSERT(s1.st_size == s2.st_size);
+  ASSERT(s2.st_size == expected_size);
 
   /* Cleanup. */
   unlink("test_file");
@@ -1110,6 +1115,23 @@ TEST_IMPL(fs_async_sendfile) {
 
   MAKE_VALGRIND_HAPPY();
   return 0;
+}
+
+
+static void sendfile_setup(int f) {
+  ASSERT(6 == write(f, "begin\n", 6));
+  ASSERT(65542 == lseek(f, 65536, SEEK_CUR));
+  ASSERT(4 == write(f, "end\n", 4));
+}
+
+
+TEST_IMPL(fs_async_sendfile) {
+  return test_sendfile(sendfile_setup, sendfile_cb, 65546);
+}
+
+
+TEST_IMPL(fs_async_sendfile_nodata) {
+  return test_sendfile(NULL, sendfile_nodata_cb, 0);
 }
 
 
@@ -1171,6 +1193,7 @@ TEST_IMPL(fs_fstat) {
   ASSERT(req.result == sizeof(test_buf));
   uv_fs_req_cleanup(&req);
 
+  memset(&req.statbuf, 0xaa, sizeof(req.statbuf));
   r = uv_fs_fstat(NULL, &req, file, NULL);
   ASSERT(r == 0);
   ASSERT(req.result == 0);
@@ -1257,6 +1280,8 @@ TEST_IMPL(fs_fstat) {
          s->st_birthtim.tv_sec == t.st_ctim.tv_sec);
   ASSERT(s->st_birthtim.tv_nsec == 0 ||
          s->st_birthtim.tv_nsec == t.st_ctim.tv_nsec);
+  ASSERT(s->st_flags == 0);
+  ASSERT(s->st_gen == 0);
 #endif
 
   uv_fs_req_cleanup(&req);
@@ -1629,6 +1654,8 @@ TEST_IMPL(fs_chown) {
   uv_run(loop, UV_RUN_DEFAULT);
   ASSERT(fchown_cb_count == 1);
 
+#ifndef __HAIKU__
+  /* Haiku doesn't support hardlink */
   /* sync link */
   r = uv_fs_link(NULL, &req, "test_file", "test_file_link", NULL);
   ASSERT(r == 0);
@@ -1646,6 +1673,7 @@ TEST_IMPL(fs_chown) {
   ASSERT(r == 0);
   uv_run(loop, UV_RUN_DEFAULT);
   ASSERT(lchown_cb_count == 1);
+#endif
 
   /* Close file */
   r = uv_fs_close(NULL, &req, file, NULL);
@@ -2687,6 +2715,60 @@ TEST_IMPL(fs_rename_to_existing_file) {
   /* Cleanup */
   unlink("test_file");
   unlink("test_file2");
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+
+
+TEST_IMPL(fs_read_bufs) {
+  char scratch[768];
+  uv_buf_t bufs[4];
+
+  ASSERT(0 <= uv_fs_open(NULL, &open_req1,
+                         "test/fixtures/lorem_ipsum.txt",
+                         O_RDONLY, 0, NULL));
+  ASSERT(open_req1.result >= 0);
+  uv_fs_req_cleanup(&open_req1);
+
+  ASSERT(UV_EINVAL == uv_fs_read(NULL, &read_req, open_req1.result,
+                                 NULL, 0, 0, NULL));
+  ASSERT(UV_EINVAL == uv_fs_read(NULL, &read_req, open_req1.result,
+                                 NULL, 1, 0, NULL));
+  ASSERT(UV_EINVAL == uv_fs_read(NULL, &read_req, open_req1.result,
+                                 bufs, 0, 0, NULL));
+
+  bufs[0] = uv_buf_init(scratch + 0, 256);
+  bufs[1] = uv_buf_init(scratch + 256, 256);
+  bufs[2] = uv_buf_init(scratch + 512, 128);
+  bufs[3] = uv_buf_init(scratch + 640, 128);
+
+  ASSERT(446 == uv_fs_read(NULL,
+                           &read_req,
+                           open_req1.result,
+                           bufs + 0,
+                           2,  /* 2x 256 bytes. */
+                           0,  /* Positional read. */
+                           NULL));
+  ASSERT(read_req.result == 446);
+  uv_fs_req_cleanup(&read_req);
+
+  ASSERT(190 == uv_fs_read(NULL,
+                           &read_req,
+                           open_req1.result,
+                           bufs + 2,
+                           2,  /* 2x 128 bytes. */
+                           256,  /* Positional read. */
+                           NULL));
+  ASSERT(read_req.result == /* 446 - 256 */ 190);
+  uv_fs_req_cleanup(&read_req);
+
+  ASSERT(0 == memcmp(bufs[1].base + 0, bufs[2].base, 128));
+  ASSERT(0 == memcmp(bufs[1].base + 128, bufs[3].base, 190 - 128));
+
+  ASSERT(0 == uv_fs_close(NULL, &close_req, open_req1.result, NULL));
+  ASSERT(close_req.result == 0);
+  uv_fs_req_cleanup(&close_req);
 
   MAKE_VALGRIND_HAPPY();
   return 0;

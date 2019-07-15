@@ -320,6 +320,11 @@ uint64_t uv_get_total_memory(void) {
 }
 
 
+uint64_t uv_get_constrained_memory(void) {
+  return 0;  /* Memory constraints are unknown. */
+}
+
+
 uv_pid_t uv_os_getpid(void) {
   return GetCurrentProcessId();
 }
@@ -703,9 +708,11 @@ int uv_cpu_info(uv_cpu_info_t** cpu_infos_ptr, int* cpu_count_ptr) {
   return 0;
 
  error:
-  /* This is safe because the cpu_infos array is zeroed on allocation. */
-  for (i = 0; i < cpu_count; i++)
-    uv__free(cpu_infos[i].model);
+  if (cpu_infos != NULL) {
+    /* This is safe because the cpu_infos array is zeroed on allocation. */
+    for (i = 0; i < cpu_count; i++)
+      uv__free(cpu_infos[i].model);
+  }
 
   uv__free(cpu_infos);
   uv__free(sppi);
@@ -1164,18 +1171,18 @@ int uv_os_homedir(char* buffer, size_t* size) {
 
 
 int uv_os_tmpdir(char* buffer, size_t* size) {
-  wchar_t path[MAX_PATH + 1];
+  wchar_t path[MAX_PATH + 2];
   DWORD bufsize;
   size_t len;
 
   if (buffer == NULL || size == NULL || *size == 0)
     return UV_EINVAL;
 
-  len = GetTempPathW(MAX_PATH + 1, path);
+  len = GetTempPathW(ARRAY_SIZE(path), path);
 
   if (len == 0) {
     return uv_translate_sys_error(GetLastError());
-  } else if (len > MAX_PATH + 1) {
+  } else if (len > ARRAY_SIZE(path)) {
     /* This should not be possible */
     return UV_EIO;
   }
@@ -1777,4 +1784,21 @@ error:
   buffer->version[0] = '\0';
   buffer->machine[0] = '\0';
   return r;
+}
+
+int uv_gettimeofday(uv_timeval64_t* tv) {
+  /* Based on https://doxygen.postgresql.org/gettimeofday_8c_source.html */
+  const uint64_t epoch = (uint64_t) 116444736000000000ULL;
+  FILETIME file_time;
+  ULARGE_INTEGER ularge;
+
+  if (tv == NULL)
+    return UV_EINVAL;
+
+  GetSystemTimeAsFileTime(&file_time);
+  ularge.LowPart = file_time.dwLowDateTime;
+  ularge.HighPart = file_time.dwHighDateTime;
+  tv->tv_sec = (int64_t) ((ularge.QuadPart - epoch) / 10000000L);
+  tv->tv_usec = (int32_t) (((ularge.QuadPart - epoch) % 10000000L) / 10);
+  return 0;
 }

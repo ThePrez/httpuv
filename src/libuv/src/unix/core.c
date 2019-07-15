@@ -41,6 +41,7 @@
 #include <sys/resource.h> /* getrusage */
 #include <pwd.h>
 #include <sys/utsname.h>
+#include <sys/time.h>
 
 #ifdef __sun
 # include <sys/filio.h>
@@ -85,6 +86,10 @@
 
 #if defined(__MVS__)
 #include <sys/ioctl.h>
+#endif
+
+#if defined(__linux__)
+#include <sys/syscall.h>
 #endif
 
 static int uv__run_pending(uv_loop_t* loop);
@@ -509,6 +514,34 @@ skip:
 }
 
 
+/* close() on macos has the "interesting" quirk that it fails with EINTR
+ * without closing the file descriptor when a thread is in the cancel state.
+ * That's why libuv calls close$NOCANCEL() instead.
+ *
+ * glibc on linux has a similar issue: close() is a cancellation point and
+ * will unwind the thread when it's in the cancel state. Work around that
+ * by making the system call directly. Musl libc is unaffected.
+ */
+int uv__close_nocancel(int fd) {
+#if defined(__APPLE__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdollar-in-identifier-extension"
+#if defined(__LP64__)
+  extern int close$NOCANCEL(int);
+  return close$NOCANCEL(fd);
+#else
+  extern int close$NOCANCEL$UNIX2003(int);
+  return close$NOCANCEL$UNIX2003(fd);
+#endif
+#pragma GCC diagnostic pop
+#elif defined(__linux__)
+  return syscall(SYS_close, fd);
+#else
+  return close(fd);
+#endif
+}
+
+
 int uv__close_nocheckstdio(int fd) {
   int saved_errno;
   int rc;
@@ -516,7 +549,7 @@ int uv__close_nocheckstdio(int fd) {
   assert(fd > -1);  /* Catch uninitialized io_watcher.fd bugs. */
 
   saved_errno = errno;
-  rc = close(fd);
+  rc = uv__close_nocancel(fd);
   if (rc == -1) {
     rc = UV__ERR(errno);
     if (rc == UV_EINTR || rc == UV__ERR(EINPROGRESS))
@@ -551,7 +584,7 @@ int uv__nonblock_ioctl(int fd, int set) {
 }
 
 
-#if !defined(__CYGWIN__) && !defined(__MSYS__)
+#if !defined(__CYGWIN__) && !defined(__MSYS__) && !defined(__HAIKU__)
 int uv__cloexec_ioctl(int fd, int set) {
   int r;
 
@@ -668,16 +701,38 @@ ssize_t uv__recvmsg(int fd, struct msghdr* msg, int flags) {
 
 
 int uv_cwd(char* buffer, size_t* size) {
+  char scratch[1 + UV__PATH_MAX];
+
   if (buffer == NULL || size == NULL)
     return UV_EINVAL;
 
-  if (getcwd(buffer, *size) == NULL)
+  /* Try to read directly into the user's buffer first... */
+  if (getcwd(buffer, *size) != NULL)
+    goto fixup;
+
+  if (errno != ERANGE)
     return UV__ERR(errno);
 
+  /* ...or into scratch space if the user's buffer is too small
+   * so we can report how much space to provide on the next try.
+   */
+  if (getcwd(scratch, sizeof(scratch)) == NULL)
+    return UV__ERR(errno);
+
+  buffer = scratch;
+
+fixup:
+
   *size = strlen(buffer);
+
   if (*size > 1 && buffer[*size - 1] == '/') {
-    buffer[*size-1] = '\0';
-    (*size)--;
+    *size -= 1;
+    buffer[*size] = '\0';
+  }
+
+  if (buffer == scratch) {
+    *size += 1;
+    return UV_ENOBUFS;
   }
 
   return 0;
@@ -919,7 +974,7 @@ int uv_getrusage(uv_rusage_t* rusage) {
   rusage->ru_stime.tv_sec = usage.ru_stime.tv_sec;
   rusage->ru_stime.tv_usec = usage.ru_stime.tv_usec;
 
-#if !defined(__MVS__)
+#if !defined(__MVS__) && !defined(__HAIKU__)
   rusage->ru_maxrss = usage.ru_maxrss;
   rusage->ru_ixrss = usage.ru_ixrss;
   rusage->ru_idrss = usage.ru_idrss;
@@ -1427,5 +1482,19 @@ int uv__getsockpeername(const uv_handle_t* handle,
     return UV__ERR(errno);
 
   *namelen = (int) socklen;
+  return 0;
+}
+
+int uv_gettimeofday(uv_timeval64_t* tv) {
+  struct timeval time;
+
+  if (tv == NULL)
+    return UV_EINVAL;
+
+  if (gettimeofday(&time, NULL) != 0)
+    return UV__ERR(errno);
+
+  tv->tv_sec = (int64_t) time.tv_sec;
+  tv->tv_usec = (int32_t) time.tv_usec;
   return 0;
 }

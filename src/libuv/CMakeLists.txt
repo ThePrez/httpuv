@@ -1,7 +1,6 @@
 # TODO: determine CMAKE_SYSTEM_NAME on OS/390.  Currently assumes "OS/390".
 cmake_minimum_required(VERSION 3.0)
 project(libuv)
-enable_testing()
 
 if(MSVC)
   list(APPEND uv_cflags /W4)
@@ -53,6 +52,7 @@ set(uv_test_sources
     test/test-fs-event.c
     test/test-fs-poll.c
     test/test-fs.c
+    test/test-fs-readdir.c
     test/test-get-currentexe.c
     test/test-get-loadavg.c
     test/test-get-memory.c
@@ -62,6 +62,7 @@ set(uv_test_sources
     test/test-getnameinfo.c
     test/test-getsockname.c
     test/test-getters-setters.c
+    test/test-gettimeofday.c
     test/test-handle-fileno.c
     test/test-homedir.c
     test/test-hrtime.c
@@ -135,6 +136,7 @@ set(uv_test_sources
     test/test-tcp-read-stop.c
     test/test-tcp-shutdown-after-write.c
     test/test-tcp-try-write.c
+    test/test-tcp-try-write-error.c
     test/test-tcp-unexpected-read.c
     test/test-tcp-write-after-connect.c
     test/test-tcp-write-fail.c
@@ -258,11 +260,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
        src/unix/linux-syscalls.c
        src/unix/procfs-exepath.c
        src/unix/pthread-fixes.c
-       src/unix/sysinfo-loadavg.c
-       src/unix/sysinfo-memory.c)
+       src/unix/sysinfo-loadavg.c)
 endif()
 
-if(CMAKE_SYSTEM_NAME MATCHES "Android|Darwin|Linux|OS/390")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "Android|Linux|OS/390")
   list(APPEND uv_sources src/unix/proctitle.c)
 endif()
 
@@ -275,11 +276,11 @@ if(CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD|NetBSD|OpenBSD")
   list(APPEND uv_libraries kvm)
 endif()
 
-if(CMAKE_SYSTEM_NAME MATCHES "Darwin|DragonFly|FreeBSD|NetBSD|OpenBSD")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD|NetBSD|OpenBSD")
   list(APPEND uv_sources src/unix/bsd-ifaddrs.c src/unix/kqueue.c)
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+if(APPLE)
   list(APPEND uv_defines _DARWIN_UNLIMITED_SELECT=1 _DARWIN_USE_64_BIT_INODE=1)
   list(APPEND uv_sources
        src/unix/darwin-proctitle.c
@@ -295,8 +296,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
        src/unix/linux-inotify.c
        src/unix/linux-syscalls.c
        src/unix/procfs-exepath.c
-       src/unix/sysinfo-loadavg.c
-       src/unix/sysinfo-memory.c)
+       src/unix/sysinfo-loadavg.c)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
@@ -333,7 +333,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
   list(APPEND uv_sources src/unix/no-proctitle.c src/unix/sunos.c)
 endif()
 
-if(CMAKE_SYSTEM_NAME MATCHES "Darwin|DragonFly|FreeBSD|Linux|NetBSD|OpenBSD")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD|Linux|NetBSD|OpenBSD")
   list(APPEND uv_test_libraries util)
 endif()
 
@@ -349,8 +349,11 @@ target_compile_options(uv_a PRIVATE ${uv_cflags})
 target_include_directories(uv_a PRIVATE include src)
 target_link_libraries(uv_a ${uv_libraries})
 
-if(BUILD_TESTING)
-  include(CTest)
+option(libuv_buildtests "Build the unit tests when BUILD_TESTING is enabled." ON)
+
+include(CTest)
+if(BUILD_TESTING AND libuv_buildtests)
+  enable_testing()
   add_executable(uv_run_tests ${uv_test_sources})
   target_compile_definitions(uv_run_tests
                              PRIVATE ${uv_defines} USING_UV_SHARED=1)
